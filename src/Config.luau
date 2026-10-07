@@ -9,9 +9,12 @@ local Config: Types.Config = {
 	StartOnRequire = true,
 
 	-- Switches between BulkMoveTo and Transform movement methods
-	MovementMethod = "BulkMoveTo",
+	MovementMethod = "Transform",
 
 	-- The offset ray adds to the raycast position to search for the next hit
 	RaySearchOffset = 0.001,
+
+	-- Initial pool size for Motor6D
+	InitialMotor6DPoolSize = 128,
 }
 return table.freeze(Config)

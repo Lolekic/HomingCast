@@ -6,13 +6,13 @@ Simulation.IsRunning = false
 
 local RunService = game:GetService("RunService")
 local Types = require(script.Parent.Types)
-local Debug = require(script.Parent.Debug)
 local Config = require(script.Parent.Config)
+local Motor6DPool = require(script.Parent.Motor6DPool)
 local ProjectileSettings = require(script.Parent.ProjectileSettings)
 local Calculations = require(script.Parent.Calculations)
 
-local RotateNonPhysics = Calculations.limitDirectionNonPhysics
-local RotatePhysics = Calculations.limitDirectionPhysics
+local RotateNonPhysics = Calculations.LimitDirectionNonPhysics
+local RotatePhysics = Calculations.LimitDirectionPhysics
 local CalculatePN = Calculations.CalculatePN
 local CalculateLiftYaw = Calculations.CalculateLiftYaw
 
@@ -51,6 +51,8 @@ if Config.MovementMethod == "Transform" then
 		if Motor6DAnchor.CFrame == CFrame.identity then return end
 		warn("[HomingCast]: Motor6DAnchor part cframe has changed. Transform mode may not work properly.")
 	end)
+
+	Motor6DPool.Initialize()
 end
 
 local DefaultProjectileSettings = ProjectileSettings.new()
@@ -68,9 +70,11 @@ local function ClearPostTransformConnections(projectile: Projectile)
 	end
 end
 
-local function DestroyProjectileMotor6D(projectile: Projectile)
-	if projectile._ProjectileMotor6D ~= Motor6DTemplate then
-		projectile._ProjectileMotor6D:Destroy()
+local function ReturnProjectileMotor6D(projectile: Projectile)
+	local currentMotor6D = projectile._ProjectileMotor6D
+	if currentMotor6D ~= Motor6DTemplate then
+		Motor6DPool.Return(currentMotor6D)
+		projectile._ProjectileMotor6D = Motor6DTemplate
 	end
 end
 
@@ -78,7 +82,7 @@ local function ConnectTransform(projectile: Projectile)
 	local projectilePart = projectile.ProjectilePart
 	if not projectilePart then return end
 	projectilePart.Anchored = false
-	local motor6d = Instance.new("Motor6D")
+	local motor6d = Motor6DPool.Get()
 	motor6d.Transform = projectilePart.CFrame
 	motor6d.Part0 = Motor6DAnchor
 	motor6d.Part1 = projectile.ProjectilePart
@@ -97,7 +101,6 @@ local function ConnectTransform(projectile: Projectile)
 			end
 		end)
 	end
-	return motor6d
 end
 
 local function HasRayPierced(projectile: Projectile, raycastResult: RaycastResult): boolean
@@ -181,12 +184,12 @@ local function RemoveProjectile(projectile: Projectile)
 end
 
 local function DestroyProjectile(projectile: Projectile)
-	if projectile._Destroyed then return end
-	RemoveProjectile(projectile)
-	DestroyProjectileMotor6D(projectile)
+	if projectile.Destroyed then return end
+	ReturnProjectileMotor6D(projectile)
 	ClearPostTransformConnections(projectile)
+	RemoveProjectile(projectile)
 	projectile._MarkedForDestruction = true
-	projectile._Destroyed = true
+	projectile.Destroyed = true
 end
 
 local function MoveProjectileToArray(targetProjectileArray: {Projectile}, projectile: Projectile)
@@ -264,52 +267,57 @@ local function UpdateNonPhysicsProjectile(projectile: Projectile, dt: number)
 		MarkProjectileAsDestroyed(projectile, "MaxTime")
 		return
 	end
-	
+
 	local position = projectile.Position
 	local velocity = projectile.Velocity
-	local direction = velocity.Unit
-
-	local newPosition = position + velocity * dt
-	local deltaPosition = newPosition - position
-	local distance = deltaPosition.Magnitude
+	local speed = velocity.Magnitude
+	local distance = speed * dt
 
 	if distance <= EPSILON then
 		QueueProjectileEvent(projectile.OnStep, projectile, dt)
 		return
 	end
-	
+
+	local direction = velocity / speed
+	local newPosition = position + velocity * dt
+
 	projectile.DistanceTravelled += distance
 	if projectile.DistanceTravelled >= projectile.MaxFlyDistance then
 		MarkProjectileAsDestroyed(projectile, "MaxDistance")
 		return
 	end
-	
+
 	QueueProjectileEvent(projectile.OnStep, projectile, dt)
 
+	-------[TARGET]-------
+
 	local target = projectile.Target
-	local targetPosition = Vector3.zero
-	local targetVelocity = Vector3.zero
+	local targetPosition: Vector3
+	local targetVelocity: Vector3
+
 	if target then
 		if typeof(target) == "Vector3" then
 			targetPosition = target
+			targetVelocity = Vector3.zero
 		else
 			targetPosition = target.Position
 			targetVelocity = target.AssemblyLinearVelocity
 		end
 	else
 		targetPosition = newPosition + direction * 1e9
+		targetVelocity = Vector3.zero
 	end
 
 	targetPosition += GetOffset(projectile, dt, targetPosition, targetVelocity)
-	
-	local toTarget = targetPosition - newPosition
-	local toTargetMagnitude = toTarget.Magnitude
-	local toTargetDirection = toTarget.Unit
 
 	local trajectory = projectile.Trajectory
 	if trajectory then
 		targetPosition = GetTrajectoryPosition(projectile, projectile._Origin, targetPosition, newPosition, direction, trajectory)
 	end
+
+	local toTarget = targetPosition - newPosition
+	local toTargetMagnitude = toTarget.Magnitude
+	local toTargetDirection = toTarget / toTargetMagnitude
 
 	if projectile.Prediction then
 		toTargetDirection = CalculatePN(toTarget, toTargetMagnitude, toTargetDirection, targetVelocity, velocity)
@@ -319,20 +327,32 @@ local function UpdateNonPhysicsProjectile(projectile: Projectile, dt: number)
 		QueueProjectileEvent(projectile.OnTargetLost, projectile, target)
 		projectile.Target = nil
 	end
-	
+
+	-------[RAYCAST]-------
+
 	local raycastFunction = projectile.RaycastFunction
 	local raycastParams = projectile.RaycastParams
-	
+
 	local remainingDistance = distance
 	local rayOffset = direction * RAY_SEARCH_OFFSET
 	local currentPosition = position
-	
+
 	for iteration = 1, projectile.MaxPiercesPerStep do
-		local raycastResult = raycastFunction(currentPosition, direction * remainingDistance, raycastParams, projectile, iteration)
-		if not raycastResult then break end
+		local raycastResult = raycastFunction(
+			currentPosition,
+			direction * remainingDistance,
+			raycastParams,
+			projectile,
+			iteration
+		)
+
+		if not raycastResult then
+			break
+		end
 
 		local hasPierced = HasRayPierced(projectile, raycastResult)
 		QueueProjectileEvent(projectile.OnHit, projectile, raycastResult, hasPierced)
+
 		if hasPierced ~= true then
 			MarkProjectileAsDestroyed(projectile, "Hit")
 			projectile.Position = raycastResult.Position
@@ -351,8 +371,9 @@ local function UpdateNonPhysicsProjectile(projectile: Projectile, dt: number)
 	QueueProjectileEvent(projectile.OnPositionChange, projectile, newPosition, position)
 
 	projectile.Position = newPosition
-	projectile.Velocity = RotateNonPhysics(direction, toTargetDirection, projectile.RotationSpeed * dt) * velocity.Magnitude
+	projectile.Velocity = RotateNonPhysics(direction, toTargetDirection, projectile.RotationSpeed * dt) * speed
 end
+
 
 local function UpdatePhysicsProjectile(projectile: Projectile, dt: number)
 	projectile.Elapsed += dt
@@ -360,79 +381,103 @@ local function UpdatePhysicsProjectile(projectile: Projectile, dt: number)
 		MarkProjectileAsDestroyed(projectile, "MaxTime")
 		return
 	end
-	
+
 	local velocity = projectile.Velocity
 	local position = projectile.Position
 	local cachedDirection = projectile.Direction :: Vector3
-	
-	local liftyaw = CalculateLiftYaw(projectile, cachedDirection, velocity)
-	local magnitude = velocity.Magnitude
+
+	local mass = projectile.Mass :: number
+	local gravity = projectile.Gravity :: number
+	local oldSpeed = velocity.Magnitude
+
+	-------[FORCES]-------
+
+	local liftYaw = CalculateLiftYaw(projectile, velocity, cachedDirection)
+
+	local drag = oldSpeed > 1e-6 and -velocity * (0.5 * oldSpeed * (projectile.DragCoefficient :: number)) or Vector3.zero
 
 	velocity += (
 		(
-			cachedDirection * projectile.ThrustPower :: number +
-				Vector3.new(0, projectile.Gravity :: number * projectile.Mass :: number, 0) + 
-				liftyaw +
-				projectile.AdditionalForces :: Vector3 +
-				(
-					magnitude > 1e-6 and
-					(-(0.5 * math.pow(magnitude, 2) * projectile.DragCoefficient :: number) * velocity.Unit)
-					or Vector3.zero
-				)
-		) / projectile.Mass :: number
+			cachedDirection * (projectile.ThrustPower :: number)
+				+ Vector3.yAxis * (gravity * mass)
+				+ liftYaw
+				+ (projectile.AdditionalForces :: Vector3)
+				+ drag
+		) / mass
 	) * dt
-	
-	local newPosition = position + velocity * dt
-	local deltaPosition = newPosition - position
-	local distance = deltaPosition.Magnitude
-	local direction = deltaPosition.Unit
-	
+
+	local speed = velocity.Magnitude
+	local distance = speed * dt
+
 	if distance <= EPSILON then
 		QueueProjectileEvent(projectile.OnStep, projectile, dt)
 		return
 	end
-	
+
+	local direction = velocity / speed
+	local newPosition = position + velocity * dt
+
 	projectile.DistanceTravelled += distance
 	if projectile.DistanceTravelled >= projectile.MaxFlyDistance then
 		MarkProjectileAsDestroyed(projectile, "MaxDistance")
 		return
 	end
-	
+
 	QueueProjectileEvent(projectile.OnStep, projectile, dt)
-	
+
+	-------[TARGET]-------
+
 	local target = projectile.Target
-	local targetPosition = Vector3.zero
-	local targetVelocity = Vector3.zero
+	local targetPosition: Vector3
+	local targetVelocity: Vector3
+
 	if target then
 		if typeof(target) == "Vector3" then
 			targetPosition = target
+			targetVelocity = Vector3.zero
 		else
 			targetPosition = target.Position
 			targetVelocity = target.AssemblyLinearVelocity
 		end
 	else
 		targetPosition = newPosition + direction * 1e9
+		targetVelocity = Vector3.zero
 	end
 
 	targetPosition += GetOffset(projectile, dt, targetPosition, targetVelocity)
 
 	local trajectory = projectile.Trajectory
 	if trajectory then
-		targetPosition = GetTrajectoryPosition(projectile, projectile._Origin, targetPosition, newPosition, direction, trajectory)
+		targetPosition = GetTrajectoryPosition(
+			projectile,
+			projectile._Origin,
+			targetPosition,
+			newPosition,
+			direction,
+			trajectory
+		)
 	end
-	
+
 	local toTarget = targetPosition - newPosition
 	local toTargetMagnitude = toTarget.Magnitude
-	local toTargetDirection = toTarget.Unit
+	local toTargetDirection = toTarget / toTargetMagnitude
 
 	if projectile.Prediction then
-		toTargetDirection = CalculatePN(toTarget, toTargetMagnitude, toTargetDirection, targetVelocity, velocity)
+		toTargetDirection = CalculatePN(
+			toTarget,
+			toTargetMagnitude,
+			toTargetDirection,
+			targetVelocity,
+			velocity
+		)
 	end
 
 	if target and math.clamp(toTargetDirection:Dot(direction), -1, 1) < projectile.MaxTrackAngle then
 		QueueProjectileEvent(projectile.OnTargetLost, projectile, target)
 		projectile.Target = nil
 	end
+
+	-------[RAYCAST]-------
 
 	local raycastFunction = projectile.RaycastFunction
 	local raycastParams = projectile.RaycastParams
@@ -442,11 +487,21 @@ local function UpdatePhysicsProjectile(projectile: Projectile, dt: number)
 	local currentPosition = position
 
 	for iteration = 1, projectile.MaxPiercesPerStep do
-		local raycastResult = raycastFunction(currentPosition, direction * remainingDistance, raycastParams, projectile, iteration)
-		if not raycastResult then break end
+		local raycastResult = raycastFunction(
+			currentPosition,
+			direction * remainingDistance,
+			raycastParams,
+			projectile,
+			iteration
+		)
+
+		if not raycastResult then
+			break
+		end
 
 		local hasPierced = HasRayPierced(projectile, raycastResult)
 		QueueProjectileEvent(projectile.OnHit, projectile, raycastResult, hasPierced)
+
 		if hasPierced ~= true then
 			MarkProjectileAsDestroyed(projectile, "Hit")
 			projectile.Position = raycastResult.Position
@@ -461,18 +516,16 @@ local function UpdatePhysicsProjectile(projectile: Projectile, dt: number)
 
 		currentPosition = raycastResult.Position + rayOffset
 	end
-	
-	QueueProjectileEvent(projectile.OnPositionChange, projectile, dt)
-	
+
+	QueueProjectileEvent(projectile.OnPositionChange, projectile, newPosition, position)
+
 	projectile.Position = newPosition
 	projectile.Velocity = velocity
 	projectile.Direction = RotatePhysics(
-		cachedDirection, 
+		cachedDirection,
 		toTargetDirection,
-		magnitude,
-		projectile.LiftPower :: number,
-		projectile.Mass :: number,
-		projectile.G_Limit :: number * math.abs(projectile.Gravity :: number),
+		speed,
+		projectile.G_Limit :: number * math.abs(gravity),
 		projectile.RotationSpeed,
 		dt
 	)
@@ -488,7 +541,7 @@ if Config.MovementMethod == "Transform" then
 				table.insert(destroyedProjectiles, projectile)
 			end
 		end
-		for index, projectile in ActiveInstancedPhysicsProjectiles do	
+		for index, projectile in ActiveInstancedPhysicsProjectiles do
 			UpdatePhysicsProjectile(projectile, deltaTime)
 			projectile._ProjectileMotor6D.Transform = projectile.ProjectilePartRotation.Rotation + projectile.Position
 			if projectile._MarkedForDestruction then
@@ -521,16 +574,26 @@ else
 	end
 end
 
+@native
+local function ConvertAoA(tbl: {{Value: number, AoA: number}}): {number}
+	local new = table.create(#tbl * 2)
+	for _, v in tbl do
+		table.insert(new, v.Value)
+		table.insert(new, math.rad(v.AoA))
+	end
+	return new
+end
+
 local function NewProjectile(constructorArgs: ProjectileConstructorArgs, projectileSettings: ProjectileSettings?, physicsSettings: PhysicsSettings?): Projectile
 	local projectileSettings = projectileSettings or DefaultProjectileSettings
 	local position = constructorArgs.Position or Vector3.zero
-	
+
 	local canPierce = constructorArgs.CanPierce :: Types.CanPierce
 	local offset = constructorArgs.Offset :: Types.OffsetFunction
-	
+
 	if canPierce == nil then canPierce = projectileSettings.CanPierce end
 	if offset == nil then offset = projectileSettings.Offset end
-	
+
 	local projectilePart = constructorArgs.ProjectilePart
 	local projectilePartRotation = CFrame.identity
 	if projectilePart then
@@ -538,7 +601,6 @@ local function NewProjectile(constructorArgs: ProjectileConstructorArgs, project
 	end
 	local projectile: Projectile = {
 		_Active = false,
-		_Destroyed = false,
 		_IsPhysics = false,
 		_Origin = position,
 		_MarkedForDestruction = false,
@@ -552,7 +614,8 @@ local function NewProjectile(constructorArgs: ProjectileConstructorArgs, project
 
 		Elapsed = 0,
 		DistanceTravelled = 0,
-	
+		Destroyed = false,
+
 		MaxFlyTime = constructorArgs.MaxFlyTime or projectileSettings.MaxFlyTime,
 		MaxFlyDistance = constructorArgs.MaxFlyDistance or projectileSettings.MaxFlyDistance,
 		MaxPiercesPerStep = constructorArgs.MaxPiercesPerStep or projectileSettings.MaxPiercesPerStep,
@@ -568,36 +631,36 @@ local function NewProjectile(constructorArgs: ProjectileConstructorArgs, project
 		CanPierce = canPierce,
 		Offset = offset,
 
-		OnHit = constructorArgs.OnHit,
-		OnStep = constructorArgs.OnStep,
-		OnPositionChange = constructorArgs.OnPositionChange,
-		OnDestroy = constructorArgs.OnDestroy,
-		OnTargetLost = constructorArgs.OnTargetLost,
-		OnCheckpointReached = constructorArgs.OnCheckpointReached,
-		PostTransform = constructorArgs.PostTransform,
-		PostTransformSafe = constructorArgs.PostTransformSafe,
+		OnHit = constructorArgs.OnHit or projectileSettings.OnHit,
+		OnStep = constructorArgs.OnStep or projectileSettings.OnStep,
+		OnPositionChange = constructorArgs.OnPositionChange or projectileSettings.OnPositionChange,
+		OnDestroy = constructorArgs.OnDestroy or projectileSettings.OnDestroy,
+		OnTargetLost = constructorArgs.OnTargetLost or projectileSettings.OnTargetLost,
+		OnCheckpointReached = constructorArgs.OnCheckpointReached or projectileSettings.OnCheckpointReached,
+		PostTransform = constructorArgs.PostTransform or projectileSettings.PostTransform,
+		PostTransformSafe = constructorArgs.PostTransformSafe or projectileSettings.PostTransformSafe,
 
 		BlockcastSize = constructorArgs.BlockcastSize or projectileSettings.BlockcastSize,
 		SpherecastRadius = constructorArgs.SpherecastRadius or projectileSettings.SpherecastRadius,
 		ShapecastPart = constructorArgs.ShapecastPart or projectileSettings.ShapecastPart,
 		UserData = constructorArgs.UserData,
 	}
-	
-	local TargetCached = constructorArgs.Target
+
+	local TargetCached = constructorArgs.Target or projectileSettings.Target
 	local Target: BasePart | Vector3 | nil = nil
 	if TargetCached then
 		if typeof(TargetCached) ~= 'Vector3' and TargetCached:IsA('Model') then
-			if not TargetCached.PrimaryPart then 
-				error(`Primary part was not set for the model: `..'[ '..TargetCached.Name..' ]') 
+			if not TargetCached.PrimaryPart then
+				error(`Primary part was not set for the model: `..'[ '..TargetCached.Name..' ]')
 			end
 			Target = TargetCached.PrimaryPart :: BasePart
 		else
 			Target = TargetCached :: BasePart | Vector3
-		end	
+		end
 	end
-	
+
 	projectile.Target = Target
-	
+
 	if physicsSettings then
 		projectile.Mass = physicsSettings.Mass
 		projectile.Gravity = physicsSettings.Gravity or -9.81
@@ -608,8 +671,8 @@ local function NewProjectile(constructorArgs: ProjectileConstructorArgs, project
 		projectile.InducedDragPitch = physicsSettings.InducedDragPitch
 		projectile.ThrustPower = physicsSettings.ThrustPower
 		projectile.G_Limit = physicsSettings.G_Limit
-		projectile.PitchAoA = physicsSettings.PitchAoA
-		projectile.YawAoA = physicsSettings.YawAoA
+		projectile.PitchAoA = ConvertAoA(physicsSettings.PitchAoA)
+		projectile.YawAoA = ConvertAoA(physicsSettings.YawAoA)
 		projectile.Direction = physicsSettings.Direction
 		projectile.AdditionalForces = physicsSettings.AdditionalForces or Vector3.zero
 		projectile._IsPhysics = true
@@ -650,13 +713,19 @@ end
 
 -- Marks projectile as destroyed, emits destroyed event and destroys the projectile
 function Simulation.TerminateProjectile(projectile: Projectile, reason: string?)
+	if projectile.Destroyed then return end
+
 	local lastEventIndex = #QueuedProjectileEvents
 	MarkProjectileAsDestroyed(projectile, reason)
 
 	local newEventCount = #QueuedProjectileEvents - lastEventIndex
 	DispatchLastProjectileEvents(newEventCount)
 
-	DestroyProjectile(projectile)
+	ReturnProjectileMotor6D(projectile)
+	ClearPostTransformConnections(projectile)
+	RemoveProjectile(projectile)
+	projectile._MarkedForDestruction = true
+	projectile.Destroyed = true
 end
 
 -- Activates a projectile making it start simulating
@@ -694,7 +763,7 @@ function Simulation.StepProjectile(projectile: Projectile, deltaTime: number)
 	else
 		UpdateNonPhysicsProjectile(projectile, deltaTime)
 	end
-	
+
 	if projectile.ProjectilePart then
 		projectile.ProjectilePart.CFrame = projectile.ProjectilePartRotation.Rotation + projectile.Position
 	end
@@ -715,7 +784,7 @@ function Simulation.SetProjectilePart(projectile: Projectile, basePart: BasePart
 	projectile.ProjectilePart = basePart
 	if (oldPart == nil) == (basePart == nil) then return end
 
-	DestroyProjectileMotor6D(projectile)
+	ReturnProjectileMotor6D(projectile)
 	if Config.MovementMethod == "Transform" then
 		ConnectTransform(projectile)
 	end
@@ -778,8 +847,8 @@ function Simulation.Step(deltaTime: number)
 	for _, projectile in destroyedProjectiles do
 		DestroyProjectile(projectile)
 	end
-	
-	DispatchAllProjectileEvents()	
+
+	DispatchAllProjectileEvents()
 end
 
 if Config.StartOnRequire then

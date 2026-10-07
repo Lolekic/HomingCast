@@ -24,6 +24,7 @@ export type Config = {
 	StartOnRequire: boolean,
 	MovementMethod: "BulkMoveTo" | "Transform",
 	RaySearchOffset: number,
+	InitialMotor6DPoolSize: number,
 }
 
 export type TrajectoryNode = {
@@ -62,12 +63,21 @@ export type ProjectileSettings = {
 
 	RaycastParams: RaycastParams?,
 	RaycastFunction: RaycastFunction,
-	CanPierce: CanPierce,
-	Offset: OffsetFunction,
 
 	BlockcastSize: Vector3?,
 	SpherecastRadius: number?,
 	ShapecastPart: BasePart?,
+
+	CanPierce: CanPierce,
+	Offset: OffsetFunction,
+	OnHit: OnHit?,
+	OnStep: OnStep?,
+	OnPositionChange: OnPositionChange?,
+	OnDestroy: OnDestroy?,
+	OnTargetLost: OnTargetLost?,
+	OnCheckpointReached: OnCheckpointReached?,
+	PostTransform: PostTransform?,
+	PostTransformSafe: PostTransformSafe?,
 }
 
 export type ProjectileSettingsOptional = {
@@ -82,12 +92,21 @@ export type ProjectileSettingsOptional = {
 
 	RaycastParams: RaycastParams?,
 	RaycastFunction: RaycastFunction?,
-	CanPierce: CanPierce?,
-	Offset: OffsetFunction?,
 
 	BlockcastSize: Vector3?,
 	SpherecastRadius: number?,
 	ShapecastPart: BasePart?,
+
+	CanPierce: CanPierce?,
+	Offset: OffsetFunction?,
+	OnHit: OnHit?,
+	OnStep: OnStep?,
+	OnPositionChange: OnPositionChange?,
+	OnDestroy: OnDestroy?,
+	OnTargetLost: OnTargetLost?,
+	OnCheckpointReached: OnCheckpointReached?,
+	PostTransform: PostTransform?,
+	PostTransformSafe: PostTransformSafe?,
 }
 
 export type ProjectileConstructorArgs = {
@@ -113,7 +132,7 @@ export type ProjectileConstructorArgs = {
 	OnPositionChange: OnPositionChange?,
 	OnDestroy: OnDestroy?,
 	OnTargetLost: OnTargetLost?,
-	OnCheckpointReached: OnCheckpointReached?, 
+	OnCheckpointReached: OnCheckpointReached?,
 	PostTransform: PostTransform?,
 	PostTransformSafe: PostTransformSafe?,
 
@@ -129,7 +148,6 @@ export type ProjectileConstructorArgs = {
 export type Projectile = {
 	-- Lifetime
 	_Active: boolean,
-	_Destroyed: boolean,
 	_IsPhysics: boolean,
 	_Origin: Vector3,
 	_MarkedForDestruction: boolean,
@@ -143,6 +161,7 @@ export type Projectile = {
 	Velocity: Vector3,
 	Elapsed: number,
 	DistanceTravelled: number,
+	Destroyed: boolean,
 
 	-- Data
 	MaxFlyTime: number,
@@ -157,7 +176,7 @@ export type Projectile = {
 	RaycastFunction: RaycastFunction,
 	ProjectilePart: BasePart?,
 	ProjectilePartRotation: CFrame,
-	
+
 	-- Physics
 	Mass: number?,
 	Gravity: number?,
@@ -168,8 +187,8 @@ export type Projectile = {
 	InducedDragPitch: number?,
 	ThrustPower: number?,
 	G_Limit: number?,
-	PitchAoA: {{Value: number, AoA: number}}?,
-	YawAoA: {{Value: number, AoA: number}}?,
+	PitchAoA: {number}?,
+	YawAoA: {number}?,
 	Direction: Vector3?,
 	AdditionalForces: Vector3?,
 
@@ -181,7 +200,7 @@ export type Projectile = {
 	OnPositionChange: OnPositionChange?,
 	OnDestroy: OnDestroy?,
 	OnTargetLost: OnTargetLost?,
-	OnCheckpointReached: OnCheckpointReached?, 
+	OnCheckpointReached: OnCheckpointReached?,
 	PostTransform: PostTransform?,
 	PostTransformSafe: PostTransformSafe?,
 
